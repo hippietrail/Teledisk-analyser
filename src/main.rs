@@ -246,7 +246,8 @@ struct SectorHeader {
     cylinder_number: u8,      // Cylinder number of the sector
     side_number: u8,          // Side number of the sector
     sector_number: u8,        // Sector number
-    sector_size: u8,          // Size of the sector
+    raw_sector_size: u8,      // Raw sector size (exponent)
+    sector_size: u16,         // Actual size of the sector (128 << raw_sector_size)
     flags: u8,                // Flags associated with the sector
 }
 
@@ -257,13 +258,15 @@ impl SectorHeader {
         let cylinder_number = bytes[0];
         let side_number = bytes[1];
         let sector_number = bytes[2];
-        let sector_size = bytes[3];
+        let raw_sector_size = bytes[3];
         let flags = bytes[4];
+        let sector_size = 128 << raw_sector_size; // Calculate the actual size
 
         SectorHeader {
             cylinder_number,
             side_number,
             sector_number,
+            raw_sector_size,
             sector_size,
             flags,
         }
@@ -271,21 +274,15 @@ impl SectorHeader {
 }
 
 fn analyze_teledisk_image_format_from_stream(typ: &str, container_name: Option<&str>, file_name: &str, file: &mut dyn Read) {
-    let mut parts = Vec::new();
-    if let Some(container) = container_name {
-        parts.push(container.to_string());
-    }
-    parts.push(file_name.to_string());
-    let joined = parts.join(" / ");
-
     let headers = TeleDiskHeaders::from_stream(file);
 
     if headers.image_header.is_valid() {
-        let td0_path = if let Some(container) = container_name {
-            format!("{} / {}", container, file_name)
-        } else {
-            file_name.to_string()
-        };
+        let mut parts = Vec::new();
+        if let Some(container) = container_name {
+            parts.push(container.to_string());
+        }
+        parts.push(file_name.to_string());
+        let td0_path = parts.join(" / ");
 
         println!("{} : {}{} seq {:02x} ver {:02x} rate {:02x} type {:02x} oh {} step {:02x} dos {:02x} sides {:02x} - {}",
             typ, headers.image_header.signature[0] as char, headers.image_header.signature[1] as char,
@@ -297,13 +294,12 @@ fn analyze_teledisk_image_format_from_stream(typ: &str, container_name: Option<&
             let date = NaiveDate::from_ymd_opt((comment_header.year as i32) + 1900, (comment_header.month as u32) + 1, comment_header.day as u32).unwrap();
             let time = NaiveTime::from_hms_opt(comment_header.hour as u32, comment_header.minute as u32, comment_header.second as u32).unwrap();
             let datetime = NaiveDateTime::new(date, time);
-            println!("    {} : {}", datetime, comment_header.length);
 
             // now we read 'length' bytes which we will convert to an ascii string (it's padded with zeros)
             let mut data = vec![0; comment_header.length as usize];
             file.read_exact(&mut data).expect("Failed to read data");
             let data = String::from_utf8_lossy(&data).to_string();
-            println!("    {} : {}", datetime, data);
+            // println!("    {} : {}", datetime, data);
         }
         analyse_track_and_sector_data(file, typ, headers.image_header, td0_path);
     }
@@ -314,31 +310,32 @@ fn analyse_track_and_sector_data(file: &mut dyn Read, typ: &str, header: ImageHe
         // read 1st track info
         let mut track = [0; 4];
         file.read_exact(&mut track).expect("Failed to read track info");
-        let track_header = TrackHeader::from_bytes(&track);
+        let th = TrackHeader::from_bytes(&track);
 
-        if track_header.number_of_sectors == 255 { break; }
+        if th.number_of_sectors == 255 { break; }
 
-        for s in 0..track_header.number_of_sectors {
-            // read sector info
+        for s in 0..th.number_of_sectors {
             let mut sect = [0; 6];
             file.read_exact(&mut sect).expect("Failed to read sector info");
-            let sector_header = SectorHeader::from_bytes(&sect);
+            let sh = SectorHeader::from_bytes(&sect);
 
             if t == 0 && s == 0 {
-                println!("{} : {}{} seq {:02x} ver {:02x} rate {:02x} type {:02x} oh {} step {:02x} dos {:02x} sides {:02x} \
-                            - [n{} c{:3} h{}] [c{:3} h{} s{} z{} f{:02x}] - {}",
-                    typ, header.signature[0] as char, header.signature[1] as char,
-                    header.sequence, header.version, header.data_rate, header.drive_type,
-                    if header.stepping & 0x80 == 0x80 { "O" } else { "-" },
-                    header.stepping & 0x7f, header.dos_flag, header.sides,
-                    track_header.number_of_sectors, track_header.cylinder_number, track_header.side_number,
-                    sector_header.cylinder_number, sector_header.side_number, sector_header.sector_number, 128 << sector_header.sector_size, sector_header.flags,
-                    td0_path
-                );
+                // println!("{} : {}{} seq {:02x} ver {:02x} rate {:02x} type {:02x} oh {} step {:02x} dos {:02x} sides {:02x} \
+                //             - [n{} c{:3} h{}] [c{:3} h{} s{} z{} f{:02x}] - {}",
+                //     typ, header.signature[0] as char, header.signature[1] as char,
+                //     header.sequence, header.version, header.data_rate, header.drive_type,
+                //     if header.stepping & 0x80 == 0x80 { "O" } else { "-" },
+                //     header.stepping & 0x7f, header.dos_flag, header.sides,
+                //     th.number_of_sectors, th.cylinder_number, th.side_number,
+                //     sh.cylinder_number, sh.side_number, sh.sector_number, sh.sector_size, sh.flags,
+                //     td0_path
+                // );
             } else if s == 0 {
-                println!("{: ^68}[n{} c{:3} h{}] [c{:3} h{} s{} z{} f{:02x}]", "", track_header.number_of_sectors, track_header.cylinder_number, track_header.side_number, sector_header.cylinder_number, sector_header.side_number, sector_header.sector_number, 128 << sector_header.sector_size, sector_header.flags);
+                // println!("{: ^68}[n{} c{:3} h{}] [c{:3} h{} s{} z{} f{:02x}]",
+                //     "", th.number_of_sectors, th.cylinder_number, th.side_number, sh.cylinder_number, sh.side_number, sh.sector_number, sh.sector_size, sh.flags);
             } else {
-                println!("{: ^81}[c{:3} h{} s{} z{} f{:02x}]", "", sector_header.cylinder_number, sector_header.side_number, sector_header.sector_number, 128 << sector_header.sector_size, sector_header.flags);
+                // println!("{: ^81}[c{:3} h{} s{} z{} f{:02x}]",
+                //     "", sh.cylinder_number, sh.side_number, sh.sector_number, sh.sector_size, sh.flags);
             }
 
             // data block
@@ -348,8 +345,10 @@ fn analyse_track_and_sector_data(file: &mut dyn Read, typ: &str, header: ImageHe
             let mut datablock = vec![0; dblen as usize];
             file.read_exact(&mut datablock).expect("Failed to read data block");
 
-            if t == 0 && s == 0 {
-                // analyse_tdo_sector(&datablock);
+            // track 0 or track 2 usually has the directory (4 here due to 2 sides?)
+            if (t == 0 || t == 4) && sh.sector_number == 1 {
+                println!("Track {} Sector {}->{} of '{}'", t, s, sh.sector_number, td0_path);
+                analyse_tdo_sector(sh.sector_size, datablock[0], &datablock[1..]);
             }
         }
     }
@@ -358,13 +357,114 @@ fn analyse_track_and_sector_data(file: &mut dyn Read, typ: &str, header: ImageHe
     let mut more = [0; 64];
     let r = file.read(&mut more).expect("Failed to read more");
     if r == 0 {
-        println!("EOF");
+        // println!("EOF");
     } else {
         println!("Read {} more bytes: 0x{:x?}", r, &more[0..r]);
     }
 }
 
-fn analyse_tdo_sector(datablock: &[u8]) {
-    // TODO
-    println!("TDO sector: '{:x?}'", datablock);
+fn analyse_tdo_sector(sector_size: u16, encoding_method: u8, mut input: &[u8]) {
+    // the datablock is a compressed form of the sector, let's make a buffer of the
+    let mut output = vec![0; 0 as usize];
+    match encoding_method {
+        2 => { // RLE encoding
+            while input.len() > 1 {
+                let a = input[0] as usize;
+                let b = input[1] as usize;
+
+                let (count, len) = if a == 0 {
+                    (1, b)
+                } else {
+                    (b, a * 2)
+                };
+
+                for _ in 0..count {
+                    output.extend_from_slice(&input[2..2 + len]);
+                }
+                input = &input[2 + len..]; // Move the input pointer forward
+            }
+            // assert!(output.len() == sector_size as usize);
+            // println!("Output: {} bytes '{:x?}'", output.len(), output);
+        },
+        0 => { // Raw
+            output.extend_from_slice(input);
+            // assert!(output.len() == sector_size as usize);
+        },
+        1 => { // Repeated
+            while input.len() > 1 {
+                let count = u16::from_le_bytes(input[0..2].try_into().unwrap());
+                let pattern = u16::from_le_bytes(input[2..4].try_into().unwrap());
+                for _ in 0..count {
+                    output.extend_from_slice(&pattern.to_le_bytes());
+                }
+                input = &input[4..];
+            }
+            // assert!(output.len() == sector_size as usize);
+        },
+        _ => {
+            panic!("Unknown encoding method: {}", encoding_method);
+        }
+    }
+    assert!(output.len() == sector_size as usize);
+    analyse_output_sector_as_cpm_format(&output);
 }
+
+fn analyse_output_sector_as_cpm_format(data: &[u8]) {
+    // println!("Output: {} bytes '{:x?}'", data.len(), data);
+    // assert that the data is a multiple of 32
+    // go through the data in arrays of 32 bytes
+    // the first byte is 'St' meaning status
+    // the next 11 bytes are: 8x ascii filename and 3x ascii extension
+    // the next four bytes have special meanings we don't handle yet
+    // the remaining 16 bytes are 'AL'
+    let mut good = 0;
+    for i in (0..data.len()).step_by(32) {
+        let status = data[i];
+        // filename and extension are ascii strings
+        let filename = &data[i + 1..i + 9];
+        let extension = &data[i + 9..i + 12];
+        let reserved = &data[i + 12..i + 16]; // Ex S1 S2 Rc
+        let al = &data[i + 16..i + 32];
+
+        let mut skipit = false;
+
+        if status != 0x00 && status != 0xe5 && status != 0x80 { skipit = true; }
+
+        if skipit { continue; }
+        // check if the low 7 bits in every byte of filename and extension are 0x20 <= x <= 0x7e
+        for b in filename {
+            let b = *b & 0x7f;
+            if b < 0x20 || b > 0x7e { skipit = true; }
+        }
+        for b in extension {
+            let b = *b & 0x7f;
+            if b < 0x20 || b > 0x7e { skipit = true; }
+        }
+        if skipit { continue; }
+
+        println!("{:2} St: {:02x} Name: {} Ext: {} ExS1S2Rc: {:3?} AL: {:3?}",
+            i/32, status, String::from_utf8_lossy(filename), String::from_utf8_lossy(extension), reserved, al);
+
+        good += 1;
+    }
+
+    if good == 0 {
+        let chunklen = 0x1c + 4; // Include additional bytes
+        for i in (0..data.len()).step_by(chunklen) {
+            let end = (i + chunklen).min(data.len()); // Prevent overflow
+            
+            // Print the same chunk as ASCII and hex with colors
+            let s: String = data[i..end]
+                .iter()
+                .map(|&b| {
+                    if (0x20..=0x7e).contains(&b) {
+                        format!("{} {} {}", "\x1b[32m", b as char, "\x1b[0m") // Green for ASCII characters
+                    } else {
+                        format!("{}{:02x} {}", "\x1b[34m", b, "\x1b[0m") // Blue for hex
+                    }
+                })
+                .collect();
+            
+            println!("  {}", s);
+        }
+}}
