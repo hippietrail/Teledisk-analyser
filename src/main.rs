@@ -34,6 +34,9 @@ struct Args {
     #[clap(short, long)]
     analyse_first_tracks: bool,
 
+    #[clap(short = 'u', long = "colour", alias = "color")]
+    colour: bool,
+
     /// The path to the file or directory to process
     #[clap(value_parser)]
     path: String,
@@ -343,7 +346,7 @@ fn analyze_teledisk_image_format_from_stream(
             parts.push(container.to_string());
         }
         parts.push(file_name.to_string());
-        let td0_path = parts.join(" / ");
+        let td0_path = parts.join("/");
 
         if args.disk_image_info {
             println!("{} : {}{} seq {:02x} ver {:02x} rate {:02x} type {:02x} oh {} step {:02x} dos {:02x} sides {:02x} - {}",
@@ -379,7 +382,7 @@ fn analyse_track_and_sector_data(args : &Args, file: &mut dyn Read, typ: &str, h
         if th.number_of_sectors == 255 { break; }
 
         if args.track_info {
-            println!("Track info: number_of_sectors: {}, cylinder_number: {}, side_number: {}", th.number_of_sectors, th.cylinder_number, th.side_number);
+            println!("{} sectors, cylinder #{}, side/head #{}", th.number_of_sectors, th.cylinder_number, th.side_number);
         }
 
         for s in 0..th.number_of_sectors {
@@ -434,14 +437,12 @@ fn analyse_track_and_sector_data(args : &Args, file: &mut dyn Read, typ: &str, h
     }
 }
 
-fn analyse_tdo_sector(args : &Args, sector_size: u16, encoding_method: u8, mut input: &[u8]) {
-    // the datablock is a compressed form of the sector, let's make a buffer of the
+fn analyse_tdo_sector(args: &Args, sector_size: u16, encoding_method: u8, mut input: &[u8]) {
     let mut output = vec![0; 0 as usize];
     match encoding_method {
         2 => { // RLE encoding
             while input.len() > 1 {
-                let a = input[0] as usize;
-                let b = input[1] as usize;
+                let (a, b) = (input[0] as usize, input[1] as usize);
 
                 let (count, len) = if a == 0 {
                     (1, b)
@@ -454,14 +455,9 @@ fn analyse_tdo_sector(args : &Args, sector_size: u16, encoding_method: u8, mut i
                 }
                 input = &input[2 + len..]; // Move the input pointer forward
             }
-            // assert!(output.len() == sector_size as usize);
-            if args.verbose {
-                println!("Output: {} bytes '{:x?}'", output.len(), output);
-            }
         },
         0 => { // Raw
             output.extend_from_slice(input);
-            // assert!(output.len() == sector_size as usize);
         },
         1 => { // Repeated
             while input.len() > 1 {
@@ -472,17 +468,16 @@ fn analyse_tdo_sector(args : &Args, sector_size: u16, encoding_method: u8, mut i
                 }
                 input = &input[4..];
             }
-            // assert!(output.len() == sector_size as usize);
         },
         _ => {
             panic!("Unknown encoding method: {}", encoding_method);
         }
     }
     assert!(output.len() == sector_size as usize);
-    analyse_raw_sector(&output);
+    analyse_raw_sector(args, &output);
 }
 
-fn analyse_raw_sector(data: &[u8]) {
+fn analyse_raw_sector(args: &Args, data: &[u8]) {
     // see if it looks like a CP/M directory
     let mut good = 0;
     for i in (0..data.len()).step_by(32) {
@@ -516,19 +511,21 @@ fn analyse_raw_sector(data: &[u8]) {
     }
 
     if good == 0 {
-        // see if it looks like a FAT directory
+        let (grn, blu, off) = if args.colour {
+            ("\x1b[32m", "\x1b[34m", "\x1b[0m")
+        } else {
+            ("", "", "")
+        };
         let chunklen = 0x1c + 4; // Include additional bytes
         for i in (0..data.len()).step_by(chunklen) {
             let end = (i + chunklen).min(data.len()); // Prevent overflow
-            
-            // Print the same chunk as ASCII and hex with colors
             let s: String = data[i..end]
                 .iter()
                 .map(|&b| {
                     if (0x20..=0x7e).contains(&b) {
-                        format!("{} {} {}", "\x1b[32m", b as char, "\x1b[0m") // Green for ASCII characters
+                        format!("{} {} {}", grn, b as char, off)
                     } else {
-                        format!("{}{:02x} {}", "\x1b[34m", b, "\x1b[0m") // Blue for hex
+                        format!("{}{:02x} {}", blu, b, off)
                     }
                 })
                 .collect();
