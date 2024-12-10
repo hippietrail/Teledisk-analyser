@@ -55,7 +55,11 @@ fn main() {
         if dirent.file_type().is_dir() { continue; }
 
         // filename tests
-        let norm_file_name = dirent.file_name().to_string_lossy().to_lowercase();
+        // TODO we need to use std::path::Path here with .parent()
+        // let file_parent_path = dirent.path().to_string_lossy();
+        let file_parent_path = dirent.path().parent().unwrap().to_string_lossy();
+        let file_name = dirent.file_name().to_string_lossy();
+        let norm_file_name = file_name.to_lowercase();
         let has_zip_ext = norm_file_name.ends_with("zip");
         let has_gzip_ext = [".tgz", ".gz", ".gzip"].iter().any(|ext| norm_file_name.ends_with(ext));
         // let has_tar_ext = norm_file_name.ends_with("tar");
@@ -89,30 +93,32 @@ fn main() {
         };
 
         if file_type == "Zip" {
-            process_zip_archive(&args, file, &norm_file_name);
+            process_zip_archive(&args, file, &file_parent_path, &file_name);
         } else if file_type == "Tarball" {
-            process_tarball(&args, file, &norm_file_name);
-        } else if norm_file_name.to_lowercase().ends_with(".td0") {
+            process_tarball(&args, file, &file_parent_path, &file_name);
+        } else if file_name.to_lowercase().ends_with(".td0") {
             file.seek(SeekFrom::Start(0)).expect("Failed to seek to start of file");
-            analyze_teledisk_image_format_from_stream(&args, "F", None, &norm_file_name, &mut file);
+            analyze_teledisk_image_format_from_stream(
+                &args, &mut file, "F", &file_parent_path, None, &file_name);
         }
     }
 }
 
-fn process_zip_archive(args : &Args, file: File, container_name: &str) {
+fn process_zip_archive(args : &Args, file: File, file_path: &str, container_name: &str) {
     let buf_reader = BufReader::new(file);
     let mut archive = ZipArchive::new(buf_reader).expect("Failed to read zip archive");
     for i in 0..archive.len() {
         if let Ok(mut zip_file) = archive.by_index(i) {
             if zip_file.name().to_lowercase().ends_with(".td0") {
                 let zip_file_name = zip_file.name().to_string();
-                analyze_teledisk_image_format_from_stream(args, "Z", Some(container_name), &zip_file_name, &mut zip_file);
+                analyze_teledisk_image_format_from_stream(
+                    args, &mut zip_file, "Z", file_path, Some(container_name), &zip_file_name);
             }
         }
     }
 }
 
-fn process_tarball(args : &Args, mut file: File, container_name: &str) {
+fn process_tarball(args : &Args, mut file: File, file_path: &str, container_name: &str) {
     file.seek(SeekFrom::Start(0)).expect("Failed to seek to start of file");
     let mut archive = Archive::new(GzDecoder::new(file));
     let entries = archive.entries().expect("Failed to read tarball");
@@ -121,7 +127,8 @@ fn process_tarball(args : &Args, mut file: File, container_name: &str) {
             Ok(mut entry) => {
                 if entry.path().unwrap().to_str().unwrap().to_lowercase().ends_with(".td0") {
                     let tar_file_name = entry.path().unwrap().to_string_lossy().to_string();
-                    analyze_teledisk_image_format_from_stream(args, "T", Some(container_name), &tar_file_name, &mut entry);
+                    analyze_teledisk_image_format_from_stream(
+                        args, &mut entry, "T", file_path, Some(container_name), &tar_file_name);
                 }
             },
             Err(_err) => if args.verbose {
@@ -305,11 +312,15 @@ impl SectorHeader {
     }
 }
 
-fn analyze_teledisk_image_format_from_stream(args : &Args, typ: &str, container_name: Option<&str>, file_name: &str, file: &mut dyn Read) {
+fn analyze_teledisk_image_format_from_stream(
+        args : &Args, file: &mut dyn Read,
+        typ: &str, file_path: &str, container_name: Option<&str>, file_name: &str) {
     let headers = TeleDiskHeaders::from_stream(file);
 
     if headers.image_header.is_valid() {
+        // build the full path from file_path, container name if there's a container, and file_name
         let mut parts = Vec::new();
+        parts.push(file_path.to_string());
         if let Some(container) = container_name {
             parts.push(container.to_string());
         }
