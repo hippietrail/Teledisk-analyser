@@ -17,13 +17,35 @@ struct Args {
     #[clap(short, long)]
     verbose: bool,
 
+    #[clap(short, long)]
+    disk_image_info: bool,
+
+    #[clap(short, long)]
+    track_info: bool,
+
+    #[clap(short, long)]
+    sector_info: bool,
+
+    #[clap(short, long)]
+    comment_info: bool,
+
+    #[clap(short, long)]
+    analyse_first_tracks: bool,
+
     /// The path to the file or directory to process
     #[clap(value_parser)]
     path: String,
 }
 
 fn main() {
-    let args = Args::parse();
+    let mut args = Args::parse(); 
+    if args.verbose { 
+        args.disk_image_info = true;
+        args.track_info = true; 
+        args.sector_info = true; 
+        args.comment_info = true; 
+    } 
+    let args = args;
 
     let start_path = &args.path;
     let walkdir = WalkDir::new(start_path).into_iter();
@@ -294,7 +316,7 @@ fn analyze_teledisk_image_format_from_stream(args : &Args, typ: &str, container_
         parts.push(file_name.to_string());
         let td0_path = parts.join(" / ");
 
-        if args.verbose {
+        if args.disk_image_info {
             println!("{} : {}{} seq {:02x} ver {:02x} rate {:02x} type {:02x} oh {} step {:02x} dos {:02x} sides {:02x} - {}",
                 typ, headers.image_header.signature[0] as char, headers.image_header.signature[1] as char,
                 headers.image_header.sequence, headers.image_header.version, headers.image_header.data_rate, headers.image_header.drive_type,
@@ -311,7 +333,7 @@ fn analyze_teledisk_image_format_from_stream(args : &Args, typ: &str, container_
             let mut data = vec![0; comment_header.length as usize];
             file.read_exact(&mut data).expect("Failed to read data");
             let data = String::from_utf8_lossy(&data).to_string();
-            if args.verbose {
+            if args.comment_info {
                 println!("    {} : {}", datetime, data);
             }
         }
@@ -327,12 +349,16 @@ fn analyse_track_and_sector_data(args : &Args, file: &mut dyn Read, typ: &str, h
 
         if th.number_of_sectors == 255 { break; }
 
+        if args.track_info {
+            println!("Track info: number_of_sectors: {}, cylinder_number: {}, side_number: {}", th.number_of_sectors, th.cylinder_number, th.side_number);
+        }
+
         for s in 0..th.number_of_sectors {
             let mut sect = [0; 6];
             file.read_exact(&mut sect).expect("Failed to read sector info");
             let sh = SectorHeader::from_bytes(&sect);
 
-            if args.verbose {
+            if args.sector_info {
                 if t == 0 && s == 0 {
                     println!("{} : {}{} seq {:02x} ver {:02x} rate {:02x} type {:02x} oh {} step {:02x} dos {:02x} sides {:02x} \
                                 - [n{} c{:3} h{}] [c{:3} h{} s{} z{} f{:02x}] - {}",
@@ -360,13 +386,12 @@ fn analyse_track_and_sector_data(args : &Args, file: &mut dyn Read, typ: &str, h
             let mut datablock = vec![0; dblen as usize];
             file.read_exact(&mut datablock).expect("Failed to read data block");
 
-            // TODO make the following optional behind a command line flag or 2
             // track 0 or track 2 usually has the cp/m directory (4 here due to 2 sides?)
             // track 1 usually has the FAT directory
-            if (t == 0 || t == 1 || t == 4) && sh.sector_number == 1 {
-                if args.verbose {
+            if args.analyse_first_tracks  && (t == 0 || t == 1 || t == 4) && sh.sector_number == 1 {
+                // if args.verbose {
                     println!("Track {} Sector {}->{} of '{}'", t, s, sh.sector_number, td0_path);
-                }
+                // }
                 analyse_tdo_sector(args, sh.sector_size, datablock[0], &datablock[1..]);
             }
         }
