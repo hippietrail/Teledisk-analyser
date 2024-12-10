@@ -36,7 +36,7 @@ fn main() {
         let norm_file_name = dirent.file_name().to_string_lossy().to_lowercase();
         let has_zip_ext = norm_file_name.ends_with("zip");
         let has_gzip_ext = [".tgz", ".gz", ".gzip"].iter().any(|ext| norm_file_name.ends_with(ext));
-        let has_tar_ext = norm_file_name.ends_with("tar");
+        // let has_tar_ext = norm_file_name.ends_with("tar");
 
         let mut file = File::open(dirent.path()).expect("Failed to open file");
 
@@ -67,30 +67,30 @@ fn main() {
         };
 
         if file_type == "Zip" {
-            process_zip_archive(file, &norm_file_name);
+            process_zip_archive(&args, file, &norm_file_name);
         } else if file_type == "Tarball" {
-            process_tarball(file, &norm_file_name);
+            process_tarball(&args, file, &norm_file_name);
         } else if norm_file_name.to_lowercase().ends_with(".td0") {
             file.seek(SeekFrom::Start(0)).expect("Failed to seek to start of file");
-            analyze_teledisk_image_format_from_stream("F", None, &norm_file_name, &mut file);
+            analyze_teledisk_image_format_from_stream(&args, "F", None, &norm_file_name, &mut file);
         }
     }
 }
 
-pub fn process_zip_archive(file: File, container_name: &str) {
+fn process_zip_archive(args : &Args, file: File, container_name: &str) {
     let buf_reader = BufReader::new(file);
     let mut archive = ZipArchive::new(buf_reader).expect("Failed to read zip archive");
     for i in 0..archive.len() {
         if let Ok(mut zip_file) = archive.by_index(i) {
             if zip_file.name().to_lowercase().ends_with(".td0") {
                 let zip_file_name = zip_file.name().to_string();
-                analyze_teledisk_image_format_from_stream("Z", Some(container_name), &zip_file_name, &mut zip_file);
+                analyze_teledisk_image_format_from_stream(args, "Z", Some(container_name), &zip_file_name, &mut zip_file);
             }
         }
     }
 }
 
-pub fn process_tarball(mut file: File, container_name: &str) {
+fn process_tarball(args : &Args, mut file: File, container_name: &str) {
     file.seek(SeekFrom::Start(0)).expect("Failed to seek to start of file");
     let mut archive = Archive::new(GzDecoder::new(file));
     let entries = archive.entries().expect("Failed to read tarball");
@@ -99,10 +99,12 @@ pub fn process_tarball(mut file: File, container_name: &str) {
             Ok(mut entry) => {
                 if entry.path().unwrap().to_str().unwrap().to_lowercase().ends_with(".td0") {
                     let tar_file_name = entry.path().unwrap().to_string_lossy().to_string();
-                    analyze_teledisk_image_format_from_stream("T", Some(container_name), &tar_file_name, &mut entry);
+                    analyze_teledisk_image_format_from_stream(args, "T", Some(container_name), &tar_file_name, &mut entry);
                 }
             },
-            Err(_err) => {}//println!("T Failed to read tar entry: {} {} at {}", container_name, err, i),
+            Err(_err) => if args.verbose {
+                println!("T Failed to read tar entry: {} at {}", container_name, i);
+            }
         }
     }
 }
@@ -254,7 +256,7 @@ struct SectorHeader {
     cylinder_number: u8,      // Cylinder number of the sector
     side_number: u8,          // Side number of the sector
     sector_number: u8,        // Sector number
-    raw_sector_size: u8,      // Raw sector size (exponent)
+    // raw_sector_size: u8,      // Raw sector size (exponent)
     sector_size: u16,         // Actual size of the sector (128 << raw_sector_size)
     flags: u8,                // Flags associated with the sector
 }
@@ -274,14 +276,14 @@ impl SectorHeader {
             cylinder_number,
             side_number,
             sector_number,
-            raw_sector_size,
+            // raw_sector_size,
             sector_size,
             flags,
         }
     }
 }
 
-fn analyze_teledisk_image_format_from_stream(typ: &str, container_name: Option<&str>, file_name: &str, file: &mut dyn Read) {
+fn analyze_teledisk_image_format_from_stream(args : &Args, typ: &str, container_name: Option<&str>, file_name: &str, file: &mut dyn Read) {
     let headers = TeleDiskHeaders::from_stream(file);
 
     if headers.image_header.is_valid() {
@@ -292,12 +294,13 @@ fn analyze_teledisk_image_format_from_stream(typ: &str, container_name: Option<&
         parts.push(file_name.to_string());
         let td0_path = parts.join(" / ");
 
-        // TODO put the td header printing behind a command line flag
-        println!("{} : {}{} seq {:02x} ver {:02x} rate {:02x} type {:02x} oh {} step {:02x} dos {:02x} sides {:02x} - {}",
-            typ, headers.image_header.signature[0] as char, headers.image_header.signature[1] as char,
-            headers.image_header.sequence, headers.image_header.version, headers.image_header.data_rate, headers.image_header.drive_type,
-            if headers.image_header.stepping & 0x80 == 0x80 { "O" } else { "-" },
-            headers.image_header.stepping & 0x7f, headers.image_header.dos_flag, headers.image_header.sides, td0_path);
+        if args.verbose {
+            println!("{} : {}{} seq {:02x} ver {:02x} rate {:02x} type {:02x} oh {} step {:02x} dos {:02x} sides {:02x} - {}",
+                typ, headers.image_header.signature[0] as char, headers.image_header.signature[1] as char,
+                headers.image_header.sequence, headers.image_header.version, headers.image_header.data_rate, headers.image_header.drive_type,
+                if headers.image_header.stepping & 0x80 == 0x80 { "O" } else { "-" },
+                headers.image_header.stepping & 0x7f, headers.image_header.dos_flag, headers.image_header.sides, td0_path);
+        }
 
         if let Some(comment_header) = headers.comment_header {
             let date = NaiveDate::from_ymd_opt((comment_header.year as i32) + 1900, (comment_header.month as u32) + 1, comment_header.day as u32).unwrap();
@@ -308,14 +311,15 @@ fn analyze_teledisk_image_format_from_stream(typ: &str, container_name: Option<&
             let mut data = vec![0; comment_header.length as usize];
             file.read_exact(&mut data).expect("Failed to read data");
             let data = String::from_utf8_lossy(&data).to_string();
-            // TODO put the td comment printing behind a command line flag
-            // println!("    {} : {}", datetime, data);
+            if args.verbose {
+                println!("    {} : {}", datetime, data);
+            }
         }
-        analyse_track_and_sector_data(file, typ, headers.image_header, td0_path);
+        analyse_track_and_sector_data(args, file, typ, headers.image_header, td0_path);
     }
 }
 
-fn analyse_track_and_sector_data(file: &mut dyn Read, typ: &str, header: ImageHeader, td0_path: String) {
+fn analyse_track_and_sector_data(args : &Args, file: &mut dyn Read, typ: &str, header: ImageHeader, td0_path: String) {
     for t in 0.. {
         let mut track = [0; 4];
         file.read_exact(&mut track).expect("Failed to read track info");
@@ -328,27 +332,25 @@ fn analyse_track_and_sector_data(file: &mut dyn Read, typ: &str, header: ImageHe
             file.read_exact(&mut sect).expect("Failed to read sector info");
             let sh = SectorHeader::from_bytes(&sect);
 
-            // TODO make the following optional behind a command line flag if td0 track/sector info is requested
-            if t == 0 && s == 0 {
-                // TODO make the following optional if td0 track/sector info is requested
-                // println!("{} : {}{} seq {:02x} ver {:02x} rate {:02x} type {:02x} oh {} step {:02x} dos {:02x} sides {:02x} \
-                //             - [n{} c{:3} h{}] [c{:3} h{} s{} z{} f{:02x}] - {}",
-                //     typ, header.signature[0] as char, header.signature[1] as char,
-                //     header.sequence, header.version, header.data_rate, header.drive_type,
-                //     if header.stepping & 0x80 == 0x80 { "O" } else { "-" },
-                //     header.stepping & 0x7f, header.dos_flag, header.sides,
-                //     th.number_of_sectors, th.cylinder_number, th.side_number,
-                //     sh.cylinder_number, sh.side_number, sh.sector_number, sh.sector_size, sh.flags,
-                //     td0_path
-                // );
-            } else if s == 0 {
-                // TODO make the following optional if td0 track/sector info is requested
-                // println!("{: ^68}[n{} c{:3} h{}] [c{:3} h{} s{} z{} f{:02x}]",
-                //     "", th.number_of_sectors, th.cylinder_number, th.side_number, sh.cylinder_number, sh.side_number, sh.sector_number, sh.sector_size, sh.flags);
-            } else {
-                // TODO make the following optional if td0 track/sector info is requested
-                // println!("{: ^81}[c{:3} h{} s{} z{} f{:02x}]",
-                //     "", sh.cylinder_number, sh.side_number, sh.sector_number, sh.sector_size, sh.flags);
+            if args.verbose {
+                if t == 0 && s == 0 {
+                    println!("{} : {}{} seq {:02x} ver {:02x} rate {:02x} type {:02x} oh {} step {:02x} dos {:02x} sides {:02x} \
+                                - [n{} c{:3} h{}] [c{:3} h{} s{} z{} f{:02x}] - {}",
+                        typ, header.signature[0] as char, header.signature[1] as char,
+                        header.sequence, header.version, header.data_rate, header.drive_type,
+                        if header.stepping & 0x80 == 0x80 { "O" } else { "-" },
+                        header.stepping & 0x7f, header.dos_flag, header.sides,
+                        th.number_of_sectors, th.cylinder_number, th.side_number,
+                        sh.cylinder_number, sh.side_number, sh.sector_number, sh.sector_size, sh.flags,
+                        td0_path
+                    );
+                } else if s == 0 {
+                    println!("{: ^68}[n{} c{:3} h{}] [c{:3} h{} s{} z{} f{:02x}]",
+                        "", th.number_of_sectors, th.cylinder_number, th.side_number, sh.cylinder_number, sh.side_number, sh.sector_number, sh.sector_size, sh.flags);
+                } else {
+                    println!("{: ^81}[c{:3} h{} s{} z{} f{:02x}]",
+                        "", sh.cylinder_number, sh.side_number, sh.sector_number, sh.sector_size, sh.flags);
+                }
             }
 
             // data block
@@ -362,8 +364,10 @@ fn analyse_track_and_sector_data(file: &mut dyn Read, typ: &str, header: ImageHe
             // track 0 or track 2 usually has the cp/m directory (4 here due to 2 sides?)
             // track 1 usually has the FAT directory
             if (t == 0 || t == 1 || t == 4) && sh.sector_number == 1 {
-                println!("Track {} Sector {}->{} of '{}'", t, s, sh.sector_number, td0_path);
-                analyse_tdo_sector(sh.sector_size, datablock[0], &datablock[1..]);
+                if args.verbose {
+                    println!("Track {} Sector {}->{} of '{}'", t, s, sh.sector_number, td0_path);
+                }
+                analyse_tdo_sector(args, sh.sector_size, datablock[0], &datablock[1..]);
             }
         }
     }
@@ -376,7 +380,7 @@ fn analyse_track_and_sector_data(file: &mut dyn Read, typ: &str, header: ImageHe
     }
 }
 
-fn analyse_tdo_sector(sector_size: u16, encoding_method: u8, mut input: &[u8]) {
+fn analyse_tdo_sector(args : &Args, sector_size: u16, encoding_method: u8, mut input: &[u8]) {
     // the datablock is a compressed form of the sector, let's make a buffer of the
     let mut output = vec![0; 0 as usize];
     match encoding_method {
@@ -397,7 +401,9 @@ fn analyse_tdo_sector(sector_size: u16, encoding_method: u8, mut input: &[u8]) {
                 input = &input[2 + len..]; // Move the input pointer forward
             }
             // assert!(output.len() == sector_size as usize);
-            // println!("Output: {} bytes '{:x?}'", output.len(), output);
+            if args.verbose {
+                println!("Output: {} bytes '{:x?}'", output.len(), output);
+            }
         },
         0 => { // Raw
             output.extend_from_slice(input);
