@@ -1,5 +1,4 @@
 use std::{
-    env,
     fs::File,
     io::{BufReader, Read, Seek, SeekFrom},
 };
@@ -10,14 +9,23 @@ use zip::ZipArchive;
 use chrono::NaiveDate;
 use chrono::NaiveDateTime;
 use chrono::NaiveTime;
+use clap::Parser;
+
+#[derive(Parser, Debug)]
+#[command(version, about, long_about = None)]
+struct Args {
+    #[clap(short, long)]
+    verbose: bool,
+
+    /// The path to the file or directory to process
+    #[clap(value_parser)]
+    path: String,
+}
 
 fn main() {
-    let args: Vec<String> = env::args().collect();
-    if args.len() != 2 {
-        eprintln!("Usage: {} <path>", args[0]);
-        std::process::exit(1);
-    }
-    let start_path = &args[1];
+    let args = Args::parse();
+
+    let start_path = &args.path;
     let walkdir = WalkDir::new(start_path).into_iter();
     for dirent in walkdir {
         // iterate, filtering out directories
