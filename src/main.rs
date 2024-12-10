@@ -284,6 +284,7 @@ fn analyze_teledisk_image_format_from_stream(typ: &str, container_name: Option<&
         parts.push(file_name.to_string());
         let td0_path = parts.join(" / ");
 
+        // TODO put the td header printing behind a command line flag
         println!("{} : {}{} seq {:02x} ver {:02x} rate {:02x} type {:02x} oh {} step {:02x} dos {:02x} sides {:02x} - {}",
             typ, headers.image_header.signature[0] as char, headers.image_header.signature[1] as char,
             headers.image_header.sequence, headers.image_header.version, headers.image_header.data_rate, headers.image_header.drive_type,
@@ -299,6 +300,7 @@ fn analyze_teledisk_image_format_from_stream(typ: &str, container_name: Option<&
             let mut data = vec![0; comment_header.length as usize];
             file.read_exact(&mut data).expect("Failed to read data");
             let data = String::from_utf8_lossy(&data).to_string();
+            // TODO put the td comment printing behind a command line flag
             // println!("    {} : {}", datetime, data);
         }
         analyse_track_and_sector_data(file, typ, headers.image_header, td0_path);
@@ -307,7 +309,6 @@ fn analyze_teledisk_image_format_from_stream(typ: &str, container_name: Option<&
 
 fn analyse_track_and_sector_data(file: &mut dyn Read, typ: &str, header: ImageHeader, td0_path: String) {
     for t in 0.. {
-        // read 1st track info
         let mut track = [0; 4];
         file.read_exact(&mut track).expect("Failed to read track info");
         let th = TrackHeader::from_bytes(&track);
@@ -319,7 +320,9 @@ fn analyse_track_and_sector_data(file: &mut dyn Read, typ: &str, header: ImageHe
             file.read_exact(&mut sect).expect("Failed to read sector info");
             let sh = SectorHeader::from_bytes(&sect);
 
+            // TODO make the following optional behind a command line flag if td0 track/sector info is requested
             if t == 0 && s == 0 {
+                // TODO make the following optional if td0 track/sector info is requested
                 // println!("{} : {}{} seq {:02x} ver {:02x} rate {:02x} type {:02x} oh {} step {:02x} dos {:02x} sides {:02x} \
                 //             - [n{} c{:3} h{}] [c{:3} h{} s{} z{} f{:02x}] - {}",
                 //     typ, header.signature[0] as char, header.signature[1] as char,
@@ -331,9 +334,11 @@ fn analyse_track_and_sector_data(file: &mut dyn Read, typ: &str, header: ImageHe
                 //     td0_path
                 // );
             } else if s == 0 {
+                // TODO make the following optional if td0 track/sector info is requested
                 // println!("{: ^68}[n{} c{:3} h{}] [c{:3} h{} s{} z{} f{:02x}]",
                 //     "", th.number_of_sectors, th.cylinder_number, th.side_number, sh.cylinder_number, sh.side_number, sh.sector_number, sh.sector_size, sh.flags);
             } else {
+                // TODO make the following optional if td0 track/sector info is requested
                 // println!("{: ^81}[c{:3} h{} s{} z{} f{:02x}]",
                 //     "", sh.cylinder_number, sh.side_number, sh.sector_number, sh.sector_size, sh.flags);
             }
@@ -345,20 +350,20 @@ fn analyse_track_and_sector_data(file: &mut dyn Read, typ: &str, header: ImageHe
             let mut datablock = vec![0; dblen as usize];
             file.read_exact(&mut datablock).expect("Failed to read data block");
 
-            // track 0 or track 2 usually has the directory (4 here due to 2 sides?)
-            if (t == 0 || t == 4) && sh.sector_number == 1 {
+            // TODO make the following optional behind a command line flag or 2
+            // track 0 or track 2 usually has the cp/m directory (4 here due to 2 sides?)
+            // track 1 usually has the FAT directory
+            if (t == 0 || t == 1 || t == 4) && sh.sector_number == 1 {
                 println!("Track {} Sector {}->{} of '{}'", t, s, sh.sector_number, td0_path);
                 analyse_tdo_sector(sh.sector_size, datablock[0], &datablock[1..]);
             }
         }
     }
 
-    // see if there are any more bytes
+    // see if there are any trailing bytes
     let mut more = [0; 64];
     let r = file.read(&mut more).expect("Failed to read more");
-    if r == 0 {
-        // println!("EOF");
-    } else {
+    if r != 0 {
         println!("Read {} more bytes: 0x{:x?}", r, &more[0..r]);
     }
 }
@@ -406,17 +411,11 @@ fn analyse_tdo_sector(sector_size: u16, encoding_method: u8, mut input: &[u8]) {
         }
     }
     assert!(output.len() == sector_size as usize);
-    analyse_output_sector_as_cpm_format(&output);
+    analyse_raw_sector(&output);
 }
 
-fn analyse_output_sector_as_cpm_format(data: &[u8]) {
-    // println!("Output: {} bytes '{:x?}'", data.len(), data);
-    // assert that the data is a multiple of 32
-    // go through the data in arrays of 32 bytes
-    // the first byte is 'St' meaning status
-    // the next 11 bytes are: 8x ascii filename and 3x ascii extension
-    // the next four bytes have special meanings we don't handle yet
-    // the remaining 16 bytes are 'AL'
+fn analyse_raw_sector(data: &[u8]) {
+    // see if it looks like a CP/M directory
     let mut good = 0;
     for i in (0..data.len()).step_by(32) {
         let status = data[i];
@@ -449,6 +448,7 @@ fn analyse_output_sector_as_cpm_format(data: &[u8]) {
     }
 
     if good == 0 {
+        // see if it looks like a FAT directory
         let chunklen = 0x1c + 4; // Include additional bytes
         for i in (0..data.len()).step_by(chunklen) {
             let end = (i + chunklen).min(data.len()); // Prevent overflow
