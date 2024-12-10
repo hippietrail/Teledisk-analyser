@@ -54,7 +54,7 @@ fn main() {
     for dirent in walkdir {
         // iterate, filtering out directories
         let dirent = dirent.expect("Failed to read directory entry");
-        if dirent.file_type().is_dir() { continue; }
+        if !dirent.file_type().is_file() { continue; }
 
         let abs_parent_path = dirent.path().parent().unwrap().to_string_lossy();
         let current_dir = std::env::current_dir().unwrap();
@@ -70,6 +70,14 @@ fn main() {
         // let has_tar_ext = norm_file_name.ends_with("tar");
 
         let mut file = File::open(dirent.path()).expect("Failed to open file");
+
+        let file_length = file.metadata().unwrap().len();
+        if file_length < 4 {
+            if args.verbose {
+                println!("Skipping file {}: too short ({} bytes)", dirent.path().to_string_lossy(), file_length);
+            }
+            continue; // Skip to the next file
+        }
 
         // file content tests
         let zip_magic = b"PK\x03\x04";
@@ -111,15 +119,22 @@ fn main() {
 
 fn process_zip_archive(args : &Args, file: File, file_path: &str, container_name: &str) {
     let buf_reader = BufReader::new(file);
-    let mut archive = ZipArchive::new(buf_reader).expect("Failed to read zip archive");
-    for i in 0..archive.len() {
-        if let Ok(mut zip_file) = archive.by_index(i) {
-            if zip_file.name().to_lowercase().ends_with(".td0") {
-                let zip_file_name = zip_file.name().to_string();
-                analyze_teledisk_image_format_from_stream(
-                    args, &mut zip_file, "Z", file_path, Some(container_name), &zip_file_name);
+    match ZipArchive::new(buf_reader) {
+        Ok(mut archive) => {
+            for i in 0..archive.len() {
+                match archive.by_index(i) {
+                    Ok(mut zip_file) => {
+                        if zip_file.name().to_lowercase().ends_with(".td0") {
+                            let zip_file_name = zip_file.name().to_string();
+                            analyze_teledisk_image_format_from_stream(
+                                args, &mut zip_file, "Z", file_path, Some(container_name), &zip_file_name);
+                        }
+                    },
+                    Err(e) => verbose_error(args, &format!("Failed to read zip file {}: {}", i, e))
+                }
             }
-        }
+        },
+        Err(e) => verbose_error(args, &format!("Failed to read zip archive: {}", e))
     }
 }
 
@@ -136,9 +151,7 @@ fn process_tarball(args : &Args, mut file: File, file_path: &str, container_name
                         args, &mut entry, "T", file_path, Some(container_name), &tar_file_name);
                 }
             },
-            Err(_err) => if args.verbose {
-                println!("T Failed to read tar entry: {} at {}", container_name, i);
-            }
+            Err(err) => verbose_error(args, &format!("Failed to read tar entry: {} at {}: {}", container_name, i, err))
         }
     }
 }
@@ -173,15 +186,15 @@ impl TeleDiskHeaders {
 #[derive(Debug)]
 struct ImageHeader {
     signature: [u8; 2], // Signature to identify the file format
-    sequence: u8,      // Sequence number
+    sequence: u8,       // Sequence number
     _check_sequence: u8, // Check sequence
-    version: u8,       // Version of the disk image format
-    data_rate: u8,     // Data rate of the disk image
-    drive_type: u8,    // Type of the drive
-    stepping: u8,      // Stepping field
-    dos_flag: u8,      // DOS allocation flag
-    sides: u8,         // Number of sides
-    _crc: u16,         // CRC of the header
+    version: u8,        // Version of the disk image format
+    data_rate: u8,      // Data rate of the disk image
+    drive_type: u8,     // Type of the drive
+    stepping: u8,       // Stepping field
+    dos_flag: u8,       // DOS allocation flag
+    sides: u8,          // Number of sides
+    _crc: u16,          // CRC of the header
 }
 
 impl ImageHeader {
@@ -336,7 +349,7 @@ fn analyze_teledisk_image_format_from_stream(
             println!("{} : {}{} seq {:02x} ver {:02x} rate {:02x} type {:02x} oh {} step {:02x} dos {:02x} sides {:02x} - {}",
                 typ, headers.image_header.signature[0] as char, headers.image_header.signature[1] as char,
                 headers.image_header.sequence, headers.image_header.version, headers.image_header.data_rate, headers.image_header.drive_type,
-                if headers.image_header.stepping & 0x80 == 0x80 { "O" } else { "-" },
+                if headers.comment_header.is_some() { "O" } else { "-" },
                 headers.image_header.stepping & 0x7f, headers.image_header.dos_flag, headers.image_header.sides, td0_path);
         }
 
@@ -523,3 +536,9 @@ fn analyse_raw_sector(data: &[u8]) {
             println!("  {}", s);
         }
 }}
+
+fn verbose_error(args: &Args, e: &str) {
+    if args.verbose {
+        println!("Error: {}", e);
+    }
+}
