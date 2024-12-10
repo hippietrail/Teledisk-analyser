@@ -1,6 +1,7 @@
 use std::{
     fs::File,
     io::{BufReader, Read, Seek, SeekFrom},
+    path::Path,
 };
 use flate2::read::GzDecoder;
 use tar::Archive;
@@ -10,6 +11,7 @@ use chrono::NaiveDate;
 use chrono::NaiveDateTime;
 use chrono::NaiveTime;
 use clap::Parser;
+use pathdiff::diff_paths;
 
 #[derive(Parser, Debug)]
 #[command(version, about, long_about = None)]
@@ -54,11 +56,14 @@ fn main() {
         let dirent = dirent.expect("Failed to read directory entry");
         if dirent.file_type().is_dir() { continue; }
 
-        // filename tests
-        // TODO we need to use std::path::Path here with .parent()
-        // let file_parent_path = dirent.path().to_string_lossy();
-        let file_parent_path = dirent.path().parent().unwrap().to_string_lossy();
+        let abs_parent_path = dirent.path().parent().unwrap().to_string_lossy();
+        let current_dir = std::env::current_dir().unwrap();
+        let rello = diff_paths(Path::new(abs_parent_path.as_ref()), Path::new(&current_dir)).unwrap();
+        let rel_parent_path = rello.to_string_lossy();
+
         let file_name = dirent.file_name().to_string_lossy();
+
+        // filename tests
         let norm_file_name = file_name.to_lowercase();
         let has_zip_ext = norm_file_name.ends_with("zip");
         let has_gzip_ext = [".tgz", ".gz", ".gzip"].iter().any(|ext| norm_file_name.ends_with(ext));
@@ -93,13 +98,13 @@ fn main() {
         };
 
         if file_type == "Zip" {
-            process_zip_archive(&args, file, &file_parent_path, &file_name);
+            process_zip_archive(&args, file, &rel_parent_path, &file_name);
         } else if file_type == "Tarball" {
-            process_tarball(&args, file, &file_parent_path, &file_name);
+            process_tarball(&args, file, &rel_parent_path, &file_name);
         } else if file_name.to_lowercase().ends_with(".td0") {
             file.seek(SeekFrom::Start(0)).expect("Failed to seek to start of file");
             analyze_teledisk_image_format_from_stream(
-                &args, &mut file, "F", &file_parent_path, None, &file_name);
+                &args, &mut file, "F", &rel_parent_path, None, &file_name);
         }
     }
 }
