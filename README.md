@@ -1,3 +1,6 @@
+
+![project logo](image.png)
+
 # Teledisk Analyzer
 
 A command-line tool to analyze Teledisk disk image files.
@@ -15,21 +18,8 @@ This tool walks through the directories given on the command line, searching for
 
 ## Planned Features
 
-- **Enhanced Error Handling**: Implement more robust error handling for file reading and parsing to improve user experience and debugging.
-- **Support for Additional Formats**: Extend the tool to support additional disk image formats beyond `.td0`, making it more versatile.
-- **Improved Command-Line Interface**: Enhance the command-line interface with more options and better help messages for users.
-- **Graphical User Interface (GUI)**: Consider developing a GUI for users who prefer a visual approach to analyzing disk images.
-- **Unit Tests and Documentation**: Increase test coverage and improve inline documentation for better maintainability and understanding of the codebase.
-
-## Future Development Roadmap
-
-Based on TODOs and code analysis, the following features are planned for future development:
-
-- **Enhanced Error Handling**: Implement more robust error handling for file reading and parsing to improve user experience and debugging.
-- **Support for Additional Formats**: Extend the tool to support additional disk image formats beyond `.td0`, making it more versatile.
-- **Improved Command-Line Interface**: Enhance the command-line interface with more options and better help messages for users.
-- **Graphical User Interface (GUI)**: Consider developing a GUI for users who prefer a visual approach to analyzing disk images.
-- **Unit Tests and Documentation**: Increase test coverage and improve inline documentation for better maintainability and understanding of the codebase.
+- **Support for Additional Formats**: Extend the tool to identy FAT and other disk image formats.
+- **Improved Command-Line Interface**: Enhance the command-line interface with more options.
 
 ## Installation
 
