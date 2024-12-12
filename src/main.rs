@@ -1,7 +1,8 @@
 use std::{
     fs::File,
     io::{BufReader, Read, Seek, SeekFrom},
-    path::Path,
+    ops::ControlFlow,
+    path::Path
 };
 use flate2::read::GzDecoder;
 use tar::Archive;
@@ -280,7 +281,7 @@ impl CommentHeader {
 
 #[derive(Debug)]
 struct TrackHeader {
-    number_of_sectors: u8, // Number of sectors in the track
+    number_of_sectors: u8,  // Number of sectors in the track
     cylinder_number: u8,    // Cylinder number of the track
     side_number: u8,        // Side number of the track
 }
@@ -391,6 +392,7 @@ fn analyse_track_and_sector_data(args : &Args, file: &mut dyn Read, typ: &str, h
             let sh = SectorHeader::from_bytes(&sect);
 
             if args.sector_info {
+                // new disk image: image info, track info, sector info
                 if t == 0 && s == 0 {
                     println!("{} : {}{} seq {:02x} ver {:02x} rate {:02x} type {:02x} oh {} step {:02x} dos {:02x} sides {:02x} \
                                 - [n{} c{:3} h{}] [c{:3} h{} s{} z{} f{:02x}] - {}",
@@ -402,9 +404,11 @@ fn analyse_track_and_sector_data(args : &Args, file: &mut dyn Read, typ: &str, h
                         sh.cylinder_number, sh.side_number, sh.sector_number, sh.sector_size, sh.flags,
                         td0_path
                     );
+                // sector 0 means new track: track info, sector info
                 } else if s == 0 {
                     println!("{: ^68}[n{} c{:3} h{}] [c{:3} h{} s{} z{} f{:02x}]",
                         "", th.number_of_sectors, th.cylinder_number, th.side_number, sh.cylinder_number, sh.side_number, sh.sector_number, sh.sector_size, sh.flags);
+                // all other sectors
                 } else {
                     println!("{: ^81}[c{:3} h{} s{} z{} f{:02x}]",
                         "", sh.cylinder_number, sh.side_number, sh.sector_number, sh.sector_size, sh.flags);
@@ -418,13 +422,18 @@ fn analyse_track_and_sector_data(args : &Args, file: &mut dyn Read, typ: &str, h
             let mut datablock = vec![0; dblen as usize];
             file.read_exact(&mut datablock).expect("Failed to read data block");
 
-            // track 0 or track 2 usually has the cp/m directory (4 here due to 2 sides?)
-            // track 1 usually has the FAT directory
-            if args.analyse_first_tracks  && (t == 0 || t == 1 || t == 4) && sh.sector_number == 1 {
-                // if args.verbose {
+            let should_analyse_sector = true;
+
+            if should_analyse_sector  {
+                if !args.verbose {
                     println!("Track {} Sector {}->{} of '{}'", t, s, sh.sector_number, td0_path);
-                // }
-                analyse_tdo_sector(args, sh.sector_size, datablock[0], &datablock[1..]);
+                }
+
+                // decode this sector of the td0 image into raw sector data
+                let decoded = decode_td0(datablock[0], &datablock[1..], sh.sector_size);
+                
+                // look at the sector to see if there are directory structures etc
+                analyse_raw_sector(args, &decoded);
             }
         }
     }
@@ -432,12 +441,11 @@ fn analyse_track_and_sector_data(args : &Args, file: &mut dyn Read, typ: &str, h
     // see if there are any trailing bytes
     let mut more = [0; 64];
     let r = file.read(&mut more).expect("Failed to read more");
-    if r != 0 {
-        println!("Read {} more bytes: 0x{:x?}", r, &more[0..r]);
-    }
+    if r != 0 { println!("Read {} more bytes: 0x{:x?}", r, &more[0..r]); }
 }
 
-fn analyse_tdo_sector(args: &Args, sector_size: u16, encoding_method: u8, mut input: &[u8]) {
+// turn td0 data for one sector into raw sector data
+fn decode_td0(encoding_method: u8, mut input: &[u8], sector_size: u16) -> Vec<u8> {
     let mut output = vec![0; 0 as usize];
     match encoding_method {
         2 => { // RLE encoding
@@ -474,65 +482,158 @@ fn analyse_tdo_sector(args: &Args, sector_size: u16, encoding_method: u8, mut in
         }
     }
     assert!(output.len() == sector_size as usize);
-    analyse_raw_sector(args, &output);
+    output
 }
 
 fn analyse_raw_sector(args: &Args, data: &[u8]) {
-    // see if it looks like a CP/M directory
-    let mut good = 0;
-    for i in (0..data.len()).step_by(32) {
-        let status = data[i];
-        // filename and extension are ascii strings
-        let filename = &data[i + 1..i + 9];
-        let extension = &data[i + 9..i + 12];
-        let reserved = &data[i + 12..i + 16]; // Ex S1 S2 Rc
-        let al = &data[i + 16..i + 32];
+    let mut cpm_dent_count = 0;
+    let mut dos_fat_dent_count = 0;
+    let dent_size = 32;
 
-        let mut skipit = false;
-
-        if status != 0x00 && status != 0xe5 && status != 0x80 { skipit = true; }
-
-        if skipit { continue; }
-        // check if the low 7 bits in every byte of filename and extension are 0x20 <= x <= 0x7e
-        for b in filename {
-            let b = *b & 0x7f;
-            if b < 0x20 || b > 0x7e { skipit = true; }
+    for i in (0..data.len()).step_by(dent_size) {
+        let mut clocked = 0;
+        if let ControlFlow::Continue(_) = isfat(data, i, args, dent_size) {
+            clocked += 1;
+            dos_fat_dent_count += 1;
         }
-        for b in extension {
-            let b = *b & 0x7f;
-            if b < 0x20 || b > 0x7e { skipit = true; }
+
+        if let ControlFlow::Continue(_) = iscpm(data, i, args, dent_size) {
+            clocked += 1;
+            cpm_dent_count += 1;
         }
-        if skipit { continue; }
 
-        println!("{:2} St: {:02x} Name: {} Ext: {} ExS1S2Rc: {:3?} AL: {:3?}",
-            i/32, status, String::from_utf8_lossy(filename), String::from_utf8_lossy(extension), reserved, al);
+        if clocked != 1 {
+            print_hex_and_ascii(args, i/32, &data[i..i+dent_size], clocked != 0);
+        }
+    }
+}
 
-        good += 1;
+fn isfat(data: &[u8], i: usize, args: &Args, dent_size: usize) -> ControlFlow<()> {
+    let name_and_ext = &data[i..i+11];
+    let attr = data[i+0x0b];
+    let zeros = &data[i+0x0c..i+0x16]; // zeroes in my CM1910DC.TD0
+    let time = &data[i+0x16..i+0x18]; // time
+    let date = &data[i+0x18..i+0x1a]; // date
+    let cluster1 = &data[i+0x1a..i+0x1c]; // first cluster
+    let file_size = &data[i+0x1c..i+0x20]; // file size
+
+    // filename[0] can also be: 0x00, 0x05, 0x2E, 0xE5
+    let status: Option<&str> = match name_and_ext[0] {
+        0x00 => Some("00"), // Null character
+        0x05 => Some("05"), // Special value
+        0x2E => Some("2E"), // Special value
+        0xE5 => Some("E5"), // Special value
+        b if (0x20..=0x7E).contains(&b) => Some("--"), // Printable characters
+        _ => None, // Any other value indicates an error
+    };
+
+    if status.is_none() { return ControlFlow::Break(()); }
+    let status = status.unwrap();
+    
+    for b in name_and_ext {
+        let b = *b & 0x7f;
+        if b < 0x20 || b > 0x7e { return ControlFlow::Break(()); }
     }
 
-    if good == 0 {
-        let (grn, blu, off) = if args.colour {
-            ("\x1b[32m", "\x1b[34m", "\x1b[0m")
-        } else {
-            ("", "", "")
-        };
-        let chunklen = 0x1c + 4; // Include additional bytes
-        for i in (0..data.len()).step_by(chunklen) {
-            let end = (i + chunklen).min(data.len()); // Prevent overflow
-            let s: String = data[i..end]
-                .iter()
-                .map(|&b| {
-                    if (0x20..=0x7e).contains(&b) {
-                        format!("{} {} {}", grn, b as char, off)
-                    } else {
-                        format!("{}{:02x} {}", blu, b, off)
-                    }
-                })
-                .collect();
-            
-            println!("  {}", s);
+    // count how many bytes in 'rest1' are non-zero - in my CM1910DC.TD0 they seem to be all zero
+    let nonzero_count = zeros.iter().fold(0, |acc, &b| if b != 0 { acc + 1 } else { acc });
+    if nonzero_count > 2 { return ControlFlow::Break(()); }
+
+    let first_letter = match name_and_ext[0] {
+        b if (0x20..=0x7E).contains(&b) => b as char,
+        _ => '?',
+    };
+
+    println!("F {:2} St: {} {}{}.{} Attr: {:02x} Rest: {:02x?} {:02x?} {:02x?} {:04x?} {:08x?}",
+        i/32, status,
+        first_letter, String::from_iter(name_and_ext[1..8].iter().map(|&b| b as char)),
+        String::from_iter(name_and_ext[8..11].iter().map(|&b| b as char)),
+        attr, zeros,
+        time,
+        date,
+        cluster1.iter().rev().fold(0, |acc, &b| (acc << 8) | b as usize), // 16 bit little endian
+        file_size.iter().rev().fold(0, |acc, &b| (acc << 8) | b as usize), // 32 bit little endian
+    );
+
+    // file attributes
+    // 0x20 = archive
+    // 0x01 = readonly
+    // 0x02 = hidden
+    // 0x04 = system
+
+    ControlFlow::Continue(())
+}
+
+fn iscpm(data: &[u8], i: usize, args: &Args, dent_size: usize) -> ControlFlow<()> {
+    let status = data[i];
+    let cpm_name_and_ext = &data[i + 1..i + 12];
+    let ex = data[i + 12];
+    let s1 = data[i + 13];
+    let s2 = data[i + 14];
+    let rc = data[i + 15];
+    let al = &data[i + 16..i + 32];
+
+    // KC 85 / Robotron allow only 0x00, 0xe5, or 0x80
+    if status != 0x00 && status != 0xe5 && status != 0x80 { return ControlFlow::Break(()); }
+
+    for b in cpm_name_and_ext {
+        let b = *b & 0x7f;
+        if b < 0x20 || b > 0x7e { return ControlFlow::Break(()); }
+    }
+
+    let (name_and_ext, flags): ([char; 11], [bool; 11]) = cpm_name_and_ext.iter().enumerate().fold(
+        ([0 as char; 11], [false; 11]),
+        |(mut n, mut f), (i, b)| {
+            n[i] = (b & 0x7f) as char;
+            f[i] = b & 0x80 != 0;
+            (n, f)
         }
-}}
+    );
+    
+    // check for false positive when status is 0xe5 *and* so is every byte of the filename and extension
+    if status == 0xe5 && name_and_ext.iter().all(|b| *b as u8 == 0xe5) { return ControlFlow::Break(()); }
+
+    // KC 85 / Robotron -specific checks: S1 and S2 must be 0x00, s3 must be <= 128
+    if s1 != 0x00 || s2 != 0x00 || rc > 128 {
+        return ControlFlow::Break(());
+    }
+
+    let (name, ext) = name_and_ext.split_at(8);
+    // let flags_str = flags.iter().map(|b| if *b { "1" } else { "0" }).collect::<String>();
+
+    println!("C {:2} St: {:02x} {}.{} {} ExS1S2Rc: {:3?} AL: {:3?}",
+        i/32, status,
+        name.iter().collect::<String>(), ext.iter().collect::<String>(),
+        flags.iter().map(|b| if *b { "1" } else { "0" }).collect::<String>(),
+        (ex, s1, s2, rc), al);
+
+    ControlFlow::Continue(())
+}
+
+fn print_hex_and_ascii(args: &Args, line_number: usize, data: &[u8], hexonly: bool) {
+    let (grn, blu, off) = if args.colour {
+        ("\x1b[32m", "\x1b[34m", "\x1b[0m")
+    } else {
+        ("", "", "")
+    };
+    let chunklen = 0x1c + 4;
+    // Include additional bytes
+    for i in (0..data.len()).step_by(chunklen) {
+        let end = (i + chunklen).min(data.len()); // Prevent overflow
+        let s: String = data[i..end]
+            .iter()
+            .map(|&b| {
+                if !hexonly && (0x20..=0x7e).contains(&b) {
+                    format!("{} {} {}", grn, b as char, off)
+                } else {
+                    format!("{}{:02x} {}", blu, b, off)
+                }
+            })
+            .collect();
+    
+        println!("- {:2}     {}", line_number, s);
+    }
+}
 
 fn verbose_error(args: &Args, e: &str) {
     if args.verbose {
