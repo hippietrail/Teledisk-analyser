@@ -54,6 +54,7 @@ fn main() {
     let args = args;
 
     let start_path = &args.path;
+    // TODO validate start path exists
     let walkdir = WalkDir::new(start_path).into_iter();
     for dirent in walkdir {
         // iterate, filtering out directories
@@ -62,7 +63,7 @@ fn main() {
 
         let abs_parent_path = dirent.path().parent().unwrap().to_string_lossy();
         let current_dir = std::env::current_dir().unwrap();
-        let rello = diff_paths(Path::new(abs_parent_path.as_ref()), Path::new(&current_dir)).unwrap();
+        let rello = diff_paths(Path::new(abs_parent_path.as_ref()), Path::new(&current_dir)).expect("Failed to get relative path");
         let rel_parent_path = rello.to_string_lossy();
 
         let file_name = dirent.file_name().to_string_lossy();
@@ -544,22 +545,28 @@ fn isfat(data: &[u8], i: usize, args: &Args, dent_size: usize) -> ControlFlow<()
         _ => '?',
     };
 
-    println!("F {:2} St: {} {}{}.{} Attr: {:02x} Rest: {:02x?} {:02x?} {:02x?} {:04x?} {:08x?}",
+    let att = match attr {
+        b if b & !0x3f != 0 => format!("  {:02x}  ", b),
+        _ => format!("{}{}{}{}{}{}",
+            if attr & 0x20 != 0 { "a" } else { "-" },   // archive
+            if attr & 0x10 != 0 { "d" } else { "-" },   // subdir
+            if attr & 0x08 != 0 { "v" } else { "-" },   // volume
+            if attr & 0x04 != 0 { "s" } else { "-" },   // system
+            if attr & 0x02 != 0 { "h" } else { "-" },   // hidden
+            if attr & 0x01 != 0 { "r" } else { "-" }    // readonly
+        ),
+    };
+
+    println!("FAT {:2} St: {} {}{}.{} Attr: {} Rest: {:02x?} {:02x?} {:02x?} {:04x?} {:08x?}",
         i/32, status,
         first_letter, String::from_iter(name_and_ext[1..8].iter().map(|&b| b as char)),
         String::from_iter(name_and_ext[8..11].iter().map(|&b| b as char)),
-        attr, zeros,
+        att, zeros,
         time,
         date,
-        cluster1.iter().rev().fold(0, |acc, &b| (acc << 8) | b as usize), // 16 bit little endian
-        file_size.iter().rev().fold(0, |acc, &b| (acc << 8) | b as usize), // 32 bit little endian
+        cluster1.iter().rev().fold(0, |acc, &b| (acc << 8) | b as usize),   // 16 bit little endian
+        file_size.iter().rev().fold(0, |acc, &b| (acc << 8) | b as usize),  // 32 bit little endian
     );
-
-    // file attributes
-    // 0x20 = archive
-    // 0x01 = readonly
-    // 0x02 = hidden
-    // 0x04 = system
 
     ControlFlow::Continue(())
 }
@@ -598,10 +605,18 @@ fn iscpm(data: &[u8], i: usize, args: &Args, dent_size: usize) -> ControlFlow<()
         return ControlFlow::Break(());
     }
 
+    // AL must match: zero or more nonzero pairs, followed by zero or more zero pairs
+    for window in al.chunks_exact(2).collect::<Vec<_>>().windows(2) {
+        if window[1][0] != 0x00 || window[1][1] != 0x00 {
+            if window[0][0] == 0x00 && window[0][1] == 0x00 {
+                return ControlFlow::Break(());
+            }
+        }
+    }
+    
     let (name, ext) = name_and_ext.split_at(8);
-    // let flags_str = flags.iter().map(|b| if *b { "1" } else { "0" }).collect::<String>();
 
-    println!("C {:2} St: {:02x} {}.{} {} ExS1S2Rc: {:3?} AL: {:3?}",
+    println!("CPM {:2} St: {:02x} {}.{} {} ExS1S2Rc: {:3?} AL: {:3?}",
         i/32, status,
         name.iter().collect::<String>(), ext.iter().collect::<String>(),
         flags.iter().map(|b| if *b { "1" } else { "0" }).collect::<String>(),
@@ -631,7 +646,7 @@ fn print_hex_and_ascii(args: &Args, line_number: usize, data: &[u8], hexonly: bo
             })
             .collect();
     
-        println!("- {:2}     {}", line_number, s);
+        println!("--- {:2}     {}", line_number, s);
     }
 }
 
